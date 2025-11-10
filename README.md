@@ -8,20 +8,50 @@ It’s meant to be **readable, hackable, and extendable** — especially for res
 
 ## 🚀 What Is NeRF?
 
-**NeRF** stands for **Neural Radiance Fields** — a model that learns to represent a 3D scene as a continuous function.
+**NeRF** stands for **Neural Radiance Fields** — a model that learns to represent a 3D scene as a continuous function using a neural network.
 
-Instead of storing a 3D grid of voxels or point clouds, NeRF trains an **MLP (Multi-Layer Perceptron)** to learn a mapping:
+Instead of storing a discrete 3D grid (like voxels or point clouds), NeRF trains an **MLP (Multi-Layer Perceptron)** to learn a continuous mapping between **spatial coordinates** and **visual properties** of the scene.
 
-\[
-F_\theta: (x, y, z) \rightarrow (r, g, b, \sigma)
-\]
+---
+
+### 🧠 The Original NeRF (Full Model)
+
+In the original paper (*Mildenhall et al., ECCV 2020*), NeRF learns a function that depends on both **position** and **view direction**:
+
+$$F_\theta(\mathbf{x}, \mathbf{d}) \rightarrow (\mathbf{c}, \sigma)$$
 
 where:
-- **(x, y, z)** → 3D coordinate in space  
-- **(r, g, b)** → color at that point  
-- **σ (sigma)** → density or opacity (how much light is absorbed there)
+- $\mathbf{x} = (x, y, z)$ → 3D coordinate in world space  
+- $\mathbf{d}$ → normalized viewing direction (derived from the camera pose)  
+- $\mathbf{c} = (r, g, b)$ → emitted color  
+- $\sigma$ → density or opacity at that point  
 
-By sampling many points along **camera rays**, and integrating the results using **volume rendering**, we can “render” realistic novel views of a scene — even from unseen viewpoints.
+This dual input allows NeRF to model **view-dependent lighting effects**, such as **reflections, specular highlights**, and subtle changes in appearance as the camera moves.  
+It effectively learns a *radiance field* — how light travels through the scene depending on both location and direction.
+
+---
+
+### ⚙️ TinyNeRF (This Implementation)
+
+In this repository, we simplify the formulation to focus on the **core spatial representation**:
+
+$$F_\theta(\mathbf{x}) \rightarrow (\mathbf{c}, \sigma)$$
+
+Here, the network only takes the **3D position** as input — omitting the viewing direction $\mathbf{d}$.  
+This simplification makes the model much lighter, faster to train, and easier to understand while still demonstrating all essential NeRF components:
+- **Positional encoding** (Fourier features)  
+- **Ray sampling and marching**  
+- **Differentiable volume rendering**
+
+The trade-off is that our TinyNeRF cannot reproduce **view-dependent effects** like specularities or reflections — colors are fixed per spatial location.  
+However, it still reconstructs the overall scene geometry and diffuse appearance accurately, making it ideal as an educational and foundational implementation.
+
+---
+
+### 💡 Why This Simplification
+
+We intentionally start from this reduced version because it captures the **mathematical and conceptual essence of NeRF** — how an MLP can represent a continuous 3D field — without the added complexity of directional conditioning.  
+Once this version is understood, it becomes straightforward to extend it to the full formulation by adding **view-direction encoding** and a **split MLP architecture**, exactly as in the original paper.
 
 ---
 
@@ -118,7 +148,6 @@ $$\mathcal{L} = \frac{1}{N} \sum_{\text{pixels}} || C_\theta(\mathbf{r}) - C_{gt
 We also report **PSNR (Peak Signal-to-Noise Ratio)**:
 $$\text{PSNR} = -10 \log_{10}(\text{MSE})$$
 
----
 ---
 
 ## 📈 Understanding PSNR (Image Quality Metric)
