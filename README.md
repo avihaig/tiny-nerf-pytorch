@@ -68,9 +68,7 @@ That’s **NeRF**. It learns a continuous representation of a 3D scene using a *
 ## 🧮 Core Equations (in simple terms)
 
 ### 1. The Scene Function
-\[
-F_\theta: (x, y, z) \rightarrow (r, g, b, \sigma)
-\]
+$$F_\theta: (x, y, z) \rightarrow (r, g, b, \sigma)$$
 An MLP parameterized by θ maps each 3D coordinate to:
 - RGB color
 - Density (σ)
@@ -80,9 +78,7 @@ An MLP parameterized by θ maps each 3D coordinate to:
 ### 2. Positional Encoding (Fourier Features)
 Small networks can’t easily learn fine spatial detail, so we map coordinates to a higher frequency space:
 
-\[
-\gamma(x) = [\sin(2^0 x), \cos(2^0 x), \sin(2^1 x), \cos(2^1 x), \dots, \sin(2^{L-1} x), \cos(2^{L-1} x)]
-\]
+$$\gamma(x) = [\sin(2^0 x), \cos(2^0 x), \sin(2^1 x), \cos(2^1 x), \dots, \sin(2^{L-1} x), \cos(2^{L-1} x)]$$
 
 This lets the network represent high-frequency variations (sharp edges, textures).
 
@@ -90,9 +86,7 @@ This lets the network represent high-frequency variations (sharp edges, textures
 
 ### 3. Ray Marching (Sampling Along Rays)
 For each camera ray, we sample **N** points between a near and far bound:
-\[
-\mathbf{x}_i = \mathbf{o} + t_i \mathbf{d}, \quad t_i \in [t_{near}, t_{far}]
-\]
+$$\mathbf{x}_i = \mathbf{o} + t_i \mathbf{d}, \quad t_i \in [t_{near}, t_{far}]$$
 where:
 - **o** = ray origin (camera center)
 - **d** = ray direction
@@ -105,9 +99,7 @@ We query the network at each sampled point to get colors and densities.
 ### 4. Volume Rendering (Compositing)
 We combine these samples along the ray using the **volume rendering equation**:
 
-\[
-C(\mathbf{r}) = \sum_i T_i \, (1 - e^{-\sigma_i \delta_i}) \, c_i
-\]
+$$C(\mathbf{r}) = \sum_i T_i \, (1 - e^{-\sigma_i \delta_i}) \, c_i$$
 where:
 - \( T_i = \prod_{j < i} e^{-\sigma_j \delta_j} \) = accumulated transmittance  
 - \( \delta_i \) = distance between samples  
@@ -120,14 +112,10 @@ This gives us the final pixel color \( C(\mathbf{r}) \).
 
 ### 5. Optimization (Training)
 We train the network by minimizing mean-squared error (MSE) between rendered colors and ground truth pixels:
-\[
-\mathcal{L} = \frac{1}{N} \sum_{\text{pixels}} || C_\theta(\mathbf{r}) - C_{gt}(\mathbf{r}) ||^2
-\]
+$$\mathcal{L} = \frac{1}{N} \sum_{\text{pixels}} || C_\theta(\mathbf{r}) - C_{gt}(\mathbf{r}) ||^2$$
 
 We also report **PSNR (Peak Signal-to-Noise Ratio)**:
-\[
-\text{PSNR} = -10 \log_{10}(\text{MSE})
-\]
+$$\text{PSNR} = -10 \log_{10}(\text{MSE})$$
 
 ---
 
