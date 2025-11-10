@@ -27,3 +27,31 @@ By sampling many points along **camera rays**, and integrating the results using
 
 ## 🧩 Project Structure
 
+tiny-nerf-pytorch/
+├─ data/ # dataset (tiny_nerf_data.npz)
+├─ outputs/ # previews, final renders, gifs
+├─ checkpoints/ # model checkpoints
+├─ scripts/
+│ └─ get_data.sh # downloads dataset
+├─ src/
+│ ├─ main.py # simple test render (no training)
+│ ├─ train.py # training loop + PSNR logging
+│ ├─ data.py # load .npz dataset
+│ ├─ encoding.py # positional encoding (Fourier features)
+│ ├─ nerf.py # MLP definition
+│ ├─ rays.py # ray generation (camera model)
+│ ├─ sampling.py # stratified sampling along rays
+│ ├─ volume.py # differentiable volume rendering
+│ ├─ utils.py # helper functions (e.g., PSNR)
+│ ├─ camera.py # generate spiral camera paths
+│ └─ make_gif.py # render novel-view GIFs
+
+
+---
+
+## 🛠️ Setup
+
+### 1. Clone the repo
+```bash
+git clone https://github.com/avihaig/tiny-nerf-pytorch.git
+cd tiny-nerf-pytorch
