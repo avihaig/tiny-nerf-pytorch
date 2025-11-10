@@ -101,10 +101,11 @@ We combine these samples along the ray using the **volume rendering equation**:
 
 $$C(\mathbf{r}) = \sum_i T_i \, (1 - e^{-\sigma_i \delta_i}) \, c_i$$
 where:
-- \( T_i = \prod_{j < i} e^{-\sigma_j \delta_j} \) = accumulated transmittance  
-- \( \delta_i \) = distance between samples  
-- \( c_i \) = predicted color  
-- \( \sigma_i \) = predicted density
+- $T_i = \prod_{j < i} e^{-\sigma_j \delta_j}$ = accumulated transmittance  
+- $\delta_i$ = distance between samples  
+- $c_i$ = predicted color  
+- $\sigma_i$ = predicted density
+
 
 This gives us the final pixel color \( C(\mathbf{r}) \).
 
