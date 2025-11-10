@@ -5,6 +5,7 @@ from nerf import TinyNeRF
 from camera import spiral_poses
 from train import render_one
 
+# loads the latest checkpoint, renders each pose along the path using the same render_one function from train.py, and saves as a gif
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     d = load_tiny_nerf_npz("data/tiny_nerf_data.npz")
