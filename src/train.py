@@ -19,15 +19,15 @@ from utils import mse2psnr
 
 @dataclass
 class Config:
-    iters: int = 20000
-    n_rand: int = 2048
-    n_samples: int = 64
+    iters: int = 20000  # total training iterations/steps
+    n_rand: int = 2048  # number of random pixels/rays sampled per step
+    n_samples: int = 64 # number of samples along each ray
     lr: float = 5e-4
     near: float = 2.0
     far: float = 6.0
     log_every: int = 50
     preview_every: int = 500
-    ckpt_every: int = 1000
+    ckpt_every: int = 1000  # save checkpoint every N steps
     ckpt_path: str = "checkpoints/tinynerf_latest.pth"
     out_dir: str = "outputs"
     resume: bool = True
