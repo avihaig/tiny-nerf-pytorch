@@ -119,6 +119,50 @@ We also report **PSNR (Peak Signal-to-Noise Ratio)**:
 $$\text{PSNR} = -10 \log_{10}(\text{MSE})$$
 
 ---
+---
+
+## 📈 Understanding PSNR (Image Quality Metric)
+
+**PSNR (Peak Signal-to-Noise Ratio)** is the main quantitative metric used in the original NeRF paper to measure how close a rendered image is to the real one.
+
+It compares the **pixel-wise error** between the predicted image $\hat{I}$ and the ground truth $I$ using the **Mean Squared Error (MSE)**:
+
+$$
+\text{MSE} = \frac{1}{N} \sum_i (I_i - \hat{I}_i)^2
+$$
+
+From that, PSNR is computed as:
+
+$$
+\text{PSNR} = 10 \log_{10} \left( \frac{1}{\text{MSE}} \right)
+$$
+
+---
+
+### 🧠 Intuition
+- **MSE** measures how far off your reconstruction is — smaller is better.  
+- **PSNR** converts that error into decibels (dB): higher PSNR means better visual quality.  
+- Each **+1 dB** usually corresponds to a noticeably clearer or more accurate image.
+
+---
+
+### 📊 Typical Ranges
+
+| PSNR (dB) | Interpretation |
+|------------|----------------|
+| 15–20 | Blurry or poor reconstruction |
+| 20–25 | Reasonable quality |
+| 25–30 | Good reconstruction |
+| 30 +  | Excellent, nearly indistinguishable from ground truth |
+
+---
+
+### 💡 Why NeRF Uses PSNR
+The original NeRF paper reports PSNR as a **simple, interpretable measure** of image fidelity.  
+It’s easy to compute and lets researchers **compare model performance** across datasets and NeRF variants in a consistent way.
+
+---
+
 
 ## 🧱 Step-by-Step Pipeline
 
