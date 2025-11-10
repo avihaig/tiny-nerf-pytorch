@@ -1,5 +1,6 @@
 import torch, math
 
+# builds a simple path around a reference camera
 def spiral_poses(c2w_ref: torch.Tensor, n_frames: int = 60, radius: float = 0.3):
     device = c2w_ref.device
     out = []
