@@ -185,15 +185,16 @@ You’ll get `outputs/novel_views.gif` — a camera flying around the reconstruc
 
 | Symbol        | Meaning                          | Shape  | File          |
 | ------------- | -------------------------------- | ------ | ------------- |
-| ( (x, y, z) ) | 3D coordinate                    | (3,)   | anywhere      |
-| ( \gamma(x) ) | Positional encoding              | (63,)  | `encoding.py` |
-| ( F_\theta )  | TinyNeRF MLP                     | —      | `nerf.py`     |
-| ( c_i )       | color at sample i                | (3,)   | model output  |
-| ( \sigma_i )  | density at sample i              | (1,)   | model output  |
-| ( T_i )       | transmittance                    | scalar | `volume.py`   |
-| ( \delta_i )  | distance between samples         | scalar | `volume.py`   |
-| ( C(r) )      | rendered color                   | (3,)   | `volume.py`   |
-| PSNR          | quality metric (higher = better) | scalar | `utils.py`    |
+| $(x, y, z)$   | 3D coordinate                    | (3,)   | anywhere      |
+| $\gamma(x)$   | Positional encoding              | (63,)  | `encoding.py` |
+| $F_\theta$    | TinyNeRF MLP                     | —      | `nerf.py`     |
+| $c_i$         | color at sample i                | (3,)   | model output  |
+| $\sigma_i$    | density at sample i              | (1,)   | model output  |
+| $T_i$         | transmittance                    | scalar | `volume.py`   |
+| $\delta_i$    | distance between samples         | scalar | `volume.py`   |
+| $C(\mathbf{r})$ | rendered color                 | (3,)   | `volume.py`   |
+| **PSNR**      | quality metric (higher = better) | scalar | `utils.py`    |
+
 
 ---
 
