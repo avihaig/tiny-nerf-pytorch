@@ -29,7 +29,7 @@ By sampling many points along **camera rays**, and integrating the results using
 ## 🧩 Project Structure
 
 ```
-
+```text
 tiny-nerf-pytorch/
 ├── data/                     # Dataset (tiny_nerf_data.npz)
 ├── outputs/                  # Rendered previews, final results, and GIFs
@@ -239,8 +239,3 @@ Built as a learning-first project inspired by the original NeRF authors.
 Special thanks to the open-source community for their educational repos and tutorials.
 
 ---
-
-> “Understanding is reimplementation.” — this repo is designed so you can *read it top to bottom and understand every line* before you scale it up to your PhD affordance field model.
-
-```
-```
