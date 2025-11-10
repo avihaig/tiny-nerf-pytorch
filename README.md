@@ -25,10 +25,8 @@ By sampling many points along **camera rays**, and integrating the results using
 
 ---
 
-```markdown
 ## 🧩 Project Structure
 
-```
 ```text
 tiny-nerf-pytorch/
 ├── data/                     # Dataset (tiny_nerf_data.npz)
