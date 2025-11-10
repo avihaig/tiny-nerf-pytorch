@@ -3,6 +3,7 @@ import torch
 def stratified_samples(near, far, n_samples, rays_o, rays_d, randomized=True):
     """
     Uniformly sample n_samples points between [near, far] along each ray.
+    Optionally add stratified jitter (randomization) during training.
     Inputs:
       near, far: floats or tensors broadcastable to (N_rays, 1)
       rays_o, rays_d: (N_rays, 3)
