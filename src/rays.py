@@ -7,8 +7,8 @@ def get_rays(H: int, W: int, focal: float, c2w: torch.Tensor, device=None):
     - focal: scalar focal length (pixels)
     - c2w: (4,4) camera-to-world
     Returns:
-      rays_o: (H*W, 3)
-      rays_d: (H*W, 3) normalized
+      rays_o: (H*W, 3) (origin - the camera center)
+      rays_d: (H*W, 3) normalized ( unit direction vectors in world coords)
     Convention matches TinyNeRF tutorials: camera looks along -z.
     """
     device = device or c2w.device
