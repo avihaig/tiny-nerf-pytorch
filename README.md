@@ -208,21 +208,3 @@ You’ll get `outputs/novel_views.gif` — a camera flying around the reconstruc
   [https://colab.research.google.com/github/bmild/nerf/blob/master/tiny_nerf.ipynb](https://colab.research.google.com/github/bmild/nerf/blob/master/tiny_nerf.ipynb)
 
 ---
-
-## 🧩 Extending This Repo (For Research)
-
-This implementation is minimal but extensible:
-
-* 🔧 **Add view-direction conditioning** for specular surfaces.
-* 🪞 **Hierarchical sampling** for coarse→fine rendering.
-* 🤖 **Affordance fields**: Replace (rgb, σ) output with multi-affordance vectors for robotics research.
-* 🧠 **Feature MLPs**: Encode latent embeddings for tasks like grasp planning or motion prediction.
-
----
-
-## ❤️ Acknowledgments
-
-Built as a learning-first project inspired by the original NeRF authors.
-Special thanks to the open-source community for their educational repos and tutorials.
-
----
