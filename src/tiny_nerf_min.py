@@ -587,6 +587,10 @@ class TinyNeRF(nn.Module):
         rgb   = self.rgb(h)    # color prediction (0..1)
         return rgb, sigma
 
+model = TinyNeRF(in_dim=enc.out_dim, hidden=128, depth=4, skip_at=2).to(device)
+optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
+print(f"[model] TinyNeRF with {sum(p.numel() for p in model.parameters())} parameters")
 
 # ===========================
 # 6) STRATIFIED SAMPLING
