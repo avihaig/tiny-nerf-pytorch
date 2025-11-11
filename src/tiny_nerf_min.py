@@ -591,6 +591,339 @@ class TinyNeRF(nn.Module):
 # ===========================
 # 6) STRATIFIED SAMPLING
 # ===========================
+def stratified_samples(near, far, n_samples, rays_o, rays_d, randomized=True):
+    """
+    Sample 3D points along each camera ray between near and far planes.
+
+    ---------------------------------------------------------------
+    PURPOSE
+    ---------------------------------------------------------------
+    For every ray (origin, direction), we want to take N evenly spaced
+    samples between the "near" and "far" distances along that ray.
+    Each sample gives us a 3D point (x, y, z) that we’ll later feed
+    into the NeRF MLP to get its color and density.
+
+    ---------------------------------------------------------------
+    VISUAL REPRESENTATION
+    ---------------------------------------------------------------
+    For one ray:
+           near                     far
+            |-------------------------|
+            o----*----*----*----*----> direction
+                z1   z2   z3   z4   z5  ... (N samples)
+
+    Each '*' is a 3D position along the ray where we query the network.
+
+    If `randomized=True`, each sample is slightly “jittered” inside its
+    bin (Monte Carlo sampling), which reduces aliasing and improves
+    generalization — like adding soft noise during training.
+
+    ---------------------------------------------------------------
+    MATHEMATICAL DEFINITION (WITH EXPLANATION)
+    ---------------------------------------------------------------
+    We first define a normalized parameter t_i ∈ [0, 1], where 0 = near and 1 = far.
+
+        z_i = (1 - t_i) * near + t_i * far
+
+    - This linearly interpolates between `near` and `far`.
+    - If near=2.0, far=6.0, and t_i = 0.5 → z_i = (1-0.5)*2.0 + 0.5*6.0 = 4.0
+
+    So we get evenly spaced depth values (z-values) between the near and far planes.
+
+    Once we have those depths, we can get the actual 3D coordinates along each ray:
+
+        p_i = rays_o + z_i * rays_d
+
+    where:
+      - rays_o: (N_rays, 3)  → the 3D starting point of each ray (the camera origin)
+      - rays_d: (N_rays, 3)  → the normalized 3D direction of each ray
+      - z_i: scalar depth along that ray
+      - p_i: resulting 3D sample point
+
+    Example of one ray:
+        rays_o = (0, 0, 0)
+        rays_d = (0, 0, -1)      # ray going straight into the screen
+        near = 2, far = 6, n_samples = 4
+        z_i = [2.0, 3.33, 4.67, 6.0]
+
+        Then:
+        p_i = (0, 0, 0) + z_i * (0, 0, -1)
+            = [(0, 0, -2.0),
+               (0, 0, -3.33),
+               (0, 0, -4.67),
+               (0, 0, -6.0)]
+
+    These points are what the MLP will later “see” to predict color/density.
+
+    ---------------------------------------------------------------
+    TORCH FUNCTIONS USED
+    ---------------------------------------------------------------
+    • torch.linspace(start, end, steps)
+        → Creates evenly spaced numbers between start and end.
+          Example: torch.linspace(0, 1, 5) = [0.00, 0.25, 0.5, 0.75, 1.00]
+
+    • tensor.expand(new_shape)
+        → “Pretends” to repeat the tensor along new dimensions without copying it.
+          Example: t = [1,2,3] → t.expand(2,3) =
+                  [[1,2,3],
+                   [1,2,3]]
+
+    • tensor[:, None, :]
+        → Adds a *new* dimension (axis) at position 1.
+          Example:
+              rays_o shape: (N_rays, 3)
+              rays_o[:, None, :] → shape: (N_rays, 1, 3)
+          This is used so that when we add (rays_o + z_vals * rays_d),
+          PyTorch can automatically "broadcast" the values and match
+          each ray to all its sample depths without writing loops.
+
+    • torch.rand_like(tensor)
+        → Creates random values with the same shape as another tensor.
+          Used here to slightly randomize (jitter) each sample’s position.
+
+    ---------------------------------------------------------------
+    EXTENDED EXAMPLE
+    ---------------------------------------------------------------
+    Suppose:
+        We have 2 rays, each with 4 samples.
+        near = 2.0, far = 6.0
+
+    Step 1: Create normalized t-values
+        t = [0.00, 0.33, 0.67, 1.00]
+
+    Step 2: Interpolate z-values (depths)
+        z_vals =
+          [[2.00, 3.33, 4.67, 6.00],
+           [2.00, 3.33, 4.67, 6.00]]      # same for both rays
+
+    Step 3: Compute 3D sample points
+        Let's say:
+            rays_o[0] = (0, 0, 0)     rays_d[0] = (0, 0, -1)
+            rays_o[1] = (1, 0, 0)     rays_d[1] = (0, -1, -1)
+
+        Then:
+          pts[0] = [
+            (0, 0, -2.00),
+            (0, 0, -3.33),
+            (0, 0, -4.67),
+            (0, 0, -6.00)
+          ]
+
+          pts[1] = [
+            (1, -2.00, -2.00),
+            (1, -3.33, -3.33),
+            (1, -4.67, -4.67),
+            (1, -6.00, -6.00)
+          ]
+
+    The final shapes:
+        z_vals → (2, 4)
+        pts    → (2, 4, 3)
+    """
+    N_rays = rays_o.shape[0]
+
+    # Step 1: Create normalized depth positions t_i ∈ [0,1]
+    t_vals = torch.linspace(0., 1., steps=n_samples, device=rays_o.device)  # (n_samples,)
+
+    # Step 2: Convert to world-space depth values z_i
+    z_vals = near * (1. - t_vals) + far * t_vals                           # (n_samples,)
+    z_vals = z_vals.expand(N_rays, n_samples)                              # (N_rays, n_samples)
+
+    # Step 3 (optional): Add stratified (randomized) jitter
+    """
+    Why add randomness?
+    -------------------
+    When we sample along each ray, the z-values (depths) are evenly spaced.
+    But if we *always* sample at the same fixed positions, the model may
+    overfit to those exact locations — causing banding artifacts.
+
+    To fix that, we *perturb* (jitter) each sample slightly inside its
+    interval.  This makes the training behave like Monte Carlo integration:
+    every epoch, the ray samples change a bit, and the model learns to
+    approximate the *continuous* color field rather than memorizing discrete
+    bins.
+
+    ---------------------------------------------------------------
+    Intuition (1 D visualization)
+    ---------------------------------------------------------------
+    Suppose we have 4 bins along one ray between near=2 and far=6:
+
+         |----|----|----|----|
+         2    3    4    5    6
+         ^                 ^
+       lower             upper
+
+    Normally we would take samples exactly at the bin edges:
+         z_vals = [2.0, 3.33, 4.67, 6.0]
+
+    With jittering, we instead pick one random point *inside each bin*:
+
+         |----|----|----|----|
+         2   2.8  3.9  5.5  6
+             *     *     *     *
+
+    Every time we run training, the * locations change slightly.
+    This is why the network sees a “blurred” version of space and
+    learns smoother radiance fields.
+
+    ---------------------------------------------------------------
+    How it works in code
+    ---------------------------------------------------------------
+    mids  = 0.5 * (z_vals[:, :-1] + z_vals[:, 1:])
+        → midpoints between consecutive depth samples.
+
+    upper = torch.cat([mids, z_vals[:, -1:]], dim=-1)
+        → upper bound of each sampling bin.
+
+    lower = torch.cat([z_vals[:, :1], mids], dim=-1)
+        → lower bound of each bin.
+
+    t_rand = torch.rand_like(z_vals)
+        → uniform random numbers in [0, 1] with same shape as z_vals.
+
+    z_vals = lower + (upper - lower) * t_rand
+        → for each bin [lower_i, upper_i], pick a random point inside it.
+
+    ---------------------------------------------------------------
+    Example (numerical)
+    ---------------------------------------------------------------
+    Let’s say one ray has z_vals = [2, 4, 6]
+    so z_vals.shape = (1, 3) each element is a depth sample along that ray - near -> far
+    so : 
+        - z_vals[:, :-1] all elements except the last one [2, 4]
+        - z_vals[:, 1:]  all elements except the first one [4, 6]
+        - z_vals[:, :1] first element only [2]
+        - z_vals[:, -1:] last element only [6]
+    
+      mids  = 0.5 * (z_vals[:, :-1] + z_vals[:, 1:])
+            = 0.5 * ([2, 4] + [4, 6])
+            = [3, 5]
+
+      lower = torch.cat([z_vals[:, :1], mids], dim=-1)
+            = torch.cat([[2], [3, 5]], dim=-1)
+            = [2, 3, 5]
+
+      upper = torch.cat([mids, z_vals[:, -1:]], dim=-1)
+            = torch.cat([[3, 5], [6]], dim=-1)
+            = [3, 5, 6]
+
+    If torch.rand_like(z_vals) = [0.2, 0.7, 0.5], then:
+
+      z_vals_new = lower + (upper − lower) * rand
+                 = [2 + (3−2)*0.2, 3 + (5−3)*0.7, 5 + (6−5)*0.5]
+                 = [2.2, 4.4, 5.5]
+
+    So our new sample positions are slightly randomized inside each bin.
+    Over many iterations, this produces a more accurate approximation of
+    the volume integral along the ray.
+
+    """
+    if randomized:
+        mids = 0.5 * (z_vals[:, :-1] + z_vals[:, 1:])                     # midpoints between samples
+        upper = torch.cat([mids, z_vals[:, -1:]], dim=-1)                 # upper bounds of bins
+        lower = torch.cat([z_vals[:, :1], mids], dim=-1)                  # lower bounds of bins
+        t_rand = torch.rand_like(z_vals)                                  # random noise per bin
+        z_vals = lower + (upper - lower) * t_rand                         # jittered depths
+
+    # Step 4: Compute 3D points along each ray
+    """
+    Goal:
+      Turn each depth value z_i on a ray into its actual 3D position:
+         p_i = rays_o + z_i * rays_d
+      and do this *vectorized* for all rays and all samples at once.
+
+    Shapes before broadcasting:
+      rays_o            : (N_rays, 3)          # one origin per ray
+      rays_d            : (N_rays, 3)          # one (unit) direction per ray
+      z_vals            : (N_rays, n_samples)  # depths along each ray
+
+    Why add singleton dimensions (`None`)?
+      • rays_o[:, None, :] → (N_rays, 1,        3)
+        "Copy" each origin across its n_samples (broadcasted, no memory copy).
+      • rays_d[:, None, :] → (N_rays, 1,        3)
+        "Copy" each direction across its n_samples.
+      • z_vals[..., None]  → (N_rays, n_samples, 1)
+        Make each depth a (…, 1) so it can multiply a 3D vector component-wise.
+
+    Broadcasting rules (PyTorch/NumPy):
+      When shapes differ, dimensions of size 1 are automatically expanded
+      to match the other tensor. After adding the `None` dimensions, we get:
+
+         rays_o[:, None, :]   → (N_rays, 1,        3)
+       + rays_d[:, None, :]   → (N_rays, 1,        3)  *  z_vals[..., None] → (N_rays, n_samples, 1)
+       --------------------------------------------------------------------------------------------
+         result               → (N_rays, n_samples, 3)
+
+      Concretely:
+        - z_vals[..., None] scales each ray’s direction for every sample.
+        - Adding rays_o[:, None, :] shifts those scaled directions so they start at the origin.
+
+    The actual code:
+        pts = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., None]
+        # pts has shape (N_rays, n_samples, 3)
+
+    Why directions should be unit length:
+      We normalized rays_d earlier. That way, "1.0" in z is "1 world unit" along the ray.
+      If rays_d had length ≠ 1, the spacing between points would be distorted.
+
+    ---------------------------------------------------------------
+    MINI NUMERICAL EXAMPLE
+    ---------------------------------------------------------------
+    Suppose:
+      N_rays = 2,  n_samples = 3
+
+      rays_o =
+        [[0, 0, 0],
+         [1, 0, 0]]                           # (2,3)
+
+      rays_d =
+        [[0, 0, -1],
+         [0, -1, -1]]  (assume already normalized)   # (2,3)
+
+      z_vals =
+        [[2.0, 4.0, 6.0],
+         [2.0, 4.0, 6.0]]                     # (2,3)
+
+    After adding singleton dims:
+      rays_o[:, None, :]  → shape (2,1,3):
+        [[[0,0,0]],
+         [[1,0,0]]]
+
+      rays_d[:, None, :]  → shape (2,1,3):
+        [[[ 0,  0, -1]],
+         [[ 0, -1, -1]]]
+
+      z_vals[..., None]   → shape (2,3,1):
+        [[[2.0],[4.0],[6.0]],
+         [[2.0],[4.0],[6.0]]]
+
+    Multiply & add:
+      rays_d[:,None,:] * z_vals[...,None]  → (2,3,3)
+        ray 0 directions:
+          [0, 0, -1]*2 = [0, 0, -2]
+          [0, 0, -1]*4 = [0, 0, -4]
+          [0, 0, -1]*6 = [0, 0, -6]
+        ray 1 directions:
+          [0,-1,-1]*2 = [0,-2,-2]
+          [0,-1,-1]*4 = [0,-4,-4]
+          [0,-1,-1]*6 = [0,-6,-6]
+
+      Add origins:
+        pts =
+          ray 0: [0,0,0] + ([0,0,-2], [0,0,-4], [0,0,-6])
+               = [[0,0,-2], [0,0,-4], [0,0,-6]]
+
+          ray 1: [1,0,0] + ([0,-2,-2], [0,-4,-4], [0,-6,-6])
+               = [[1,-2,-2], [1,-4,-4], [1,-6,-6]]
+
+    Final shape:
+      pts → (N_rays, n_samples, 3) = (2, 3, 3)
+    """
+    pts = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., None]     # (N_rays, n_samples, 3)
+
+    return z_vals, pts
+
+
 
 # ===============================
 # 7) VOLUME RENDERING (COMPOSITE)
