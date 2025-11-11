@@ -928,6 +928,168 @@ def stratified_samples(near, far, n_samples, rays_o, rays_d, randomized=True):
 # ===============================
 # 7) VOLUME RENDERING (COMPOSITE)
 # ===============================
+def volume_render(rgb, sigma, z_vals, rays_d, white_bkgd=True):
+    """
+    Perform **volume rendering**, the core step that turns 3D predictions into a
+    final 2D image.
+
+    ---------------------------------------------------------------
+    What is Volume Rendering?
+    ---------------------------------------------------------------
+    Volume rendering is a way to simulate how light travels through a semi-transparent
+    3D medium (like fog, smoke, or glass).  
+    Instead of having solid surfaces, we imagine that *every point in space* can
+    emit and absorb light according to:
+      - its color (how it glows or reflects light)
+      - its density σ (how much it blocks or absorbs light)
+
+    For each camera ray, we collect contributions from many points along its path —
+    as if the ray were passing through multiple thin, translucent layers.  
+    Each layer slightly changes the ray’s color and brightness depending on how
+    “dense” it is and what color light it emits.
+
+    ---------------------------------------------------------------
+    What This Function Does
+    ---------------------------------------------------------------
+    “Composite per-ray colors from many samples along the ray using the
+    standard NeRF volume rendering equation.”
+
+    That means:
+    - We take all the 3D samples (points) along one ray.
+    - Each sample gives us a *predicted color* (rgb) and a *density* (σ) from the network.
+    - We combine (or “composite”) them together from nearest to farthest using the
+      physical **volume rendering equation**, which determines how much each
+      layer contributes to the final pixel color based on:
+        1️⃣ its opacity (α = 1 − exp(−σΔ))  
+        2️⃣ how much light passes through previous layers (T = Π(1−α))
+
+    The result is a realistic final color for each pixel that respects visibility,
+    transparency, and depth — all computed directly from the neural field.
+
+    Inputs
+    ------
+    rgb    : (N_rays, N_samples, 3)       predicted colors in [0,1] at each sample
+    sigma  : (N_rays, N_samples, 1)       predicted densities (>= 0) at each sample
+    z_vals : (N_rays, N_samples)          depth (distance) of each sample along each ray
+    rays_d : (N_rays, 3)                  ray directions (ideally unit-length)
+    white_bkgd : bool                     if True, composite over a white background
+
+    Outputs
+    -------
+    comp_rgb : (N_rays, 3)                final per-ray color after alpha compositing
+    depth    : (N_rays, 1)                expected depth (weighted avg of z)
+    acc      : (N_rays, 1)                accumulated opacity along the ray (sum of weights)
+    weights  : (N_rays, N_samples)        contribution of each sample to the final color
+
+    ---------------------------------------------------------------
+    Big Picture (Intuition)
+    ---------------------------------------------------------------
+    Imagine the space in front of the camera as many thin, semi-transparent
+    "sheets" stacked along the ray. At each sheet (sample), the network predicts:
+      - color c_i (rgb[i])
+      - density σ_i (how strongly it absorbs light)
+
+    We convert density into an "opacity" α_i for that small slice:
+        α_i = 1 - exp(-σ_i * Δ_i)
+      where Δ_i is the spacing (thickness) between consecutive samples in *world units*.
+
+    We also compute the transmittance T_i (how much light gets from the camera to i
+    without being absorbed by previous slices):
+        T_i = Π_{j < i} (1 - α_j)
+
+    The final per-ray color is the sum of each slice's color * its visibility:
+        C(ray) = Σ_i [ T_i * α_i * c_i ]  = Σ_i [ w_i * c_i ]
+    where w_i = T_i * α_i are the per-sample weights.
+
+    Depth is computed similarly as a weighted average of z:
+        D(ray) = Σ_i [ w_i * z_i ] / Σ_i [ w_i ]   (but we return Σ_i [ w_i * z_i ] and acc = Σ_i w_i)
+
+    ---------------------------------------------------------------
+    Why Δ_i is multiplied by |rays_d| ?
+    ---------------------------------------------------------------
+    If rays_d are normalized, |rays_d| = 1, so Δ_i is just the difference in z.
+    If they are not perfectly unit-length, multiplying by |rays_d| scales Δ_i
+    into actual world distance along the ray direction, keeping α_i consistent.
+
+    ---------------------------------------------------------------
+    Shapes & Tensor Ops
+    ---------------------------------------------------------------
+    • deltas = z_vals[...,1:] - z_vals[...,:-1]        → (N_rays, N_samples-1)
+      spacing between consecutive samples along each ray
+
+    • We append a huge Δ for the last sample (acts like a "back wall"):
+        delta_inf = 1e10
+        deltas = cat([deltas, delta_inf], -1)          → (N_rays, N_samples)
+
+    • alpha = 1 - exp(-sigma * deltas)                 → (N_rays, N_samples)
+      turns densities into opacities given the slice thickness
+
+    • T_i via cumulative product:
+        T = cumprod( concat([1, 1-α_i], dim=-1), dim=-1 )[:, :-1]
+      Prepend ones so T_0=1. Then drop the extra last element.
+      This yields T_i = Π_{j < i} (1 - α_j).
+
+    • weights = T * α                                  → (N_rays, N_samples)
+      contribution of each sample to final color
+
+    • comp_rgb = sum(weights[...,None] * rgb, dim=-2)  → (N_rays, 3)
+
+    • depth   = sum(weights * z_vals, dim=-1, keepdim=True)  → (N_rays, 1)
+
+    • acc     = sum(weights, dim=-1, keepdim=True)           → (N_rays, 1)
+
+    • white background:
+        C_white = C + (1 - acc)   (adds remaining visibility as white)
+      If the background should be black, skip this.
+
+    ---------------------------------------------------------------
+    Mini Numeric Sketch (single ray, tiny samples)
+    ---------------------------------------------------------------
+    Suppose one ray has 3 samples with equal spacing Δ:
+      σ = [0.8, 1.2, 3.0],  c = [[1,0,0], [0,1,0], [0,0,1]]
+
+      α_i = 1 - exp(-σ_i * Δ)   (values in (0,1))
+      T_0 = 1
+      T_1 = (1 - α_0)
+      T_2 = (1 - α_0)(1 - α_1)
+
+      weights = [T_0 α_0, T_1 α_1, T_2 α_2]
+      C = Σ_i weights[i] * c[i]
+
+    This is exactly like compositing semi-transparent colored layers front-to-back.
+
+    """
+    # 1) Compute deltas (thickness of each sample slice along the ray)
+    deltas = z_vals[..., 1:] - z_vals[..., :-1]                  # (N_rays, N_samples-1)
+    delta_inf = 1e10 * torch.ones_like(deltas[..., :1])          # "infinite" last interval
+    deltas = torch.cat([deltas, delta_inf], dim=-1)              # (N_rays, N_samples)
+
+    # Scale by |rays_d| so deltas are in world units if rays_d isn't unit-length
+    deltas = deltas * torch.norm(rays_d[:, None, :], dim=-1)     # (N_rays, N_samples)
+
+    # 2) Densities → opacities for each slice: α_i = 1 - exp(-σ_i * Δ_i)
+    #    sigma: (N_rays, N_samples, 1) → squeeze last dim to match deltas
+    alpha = 1.0 - torch.exp(-sigma.squeeze(-1) * deltas)         # (N_rays, N_samples)
+
+    # 3) Transmittance T_i = Π_{j < i} (1 - α_j)
+    #    We implement with a cumulative product. Prepend a 1 so T_0 = 1.
+    trans_prefix = torch.cat([torch.ones_like(alpha[:, :1]), 1.0 - alpha + 1e-10], dim=-1)
+    T = torch.cumprod(trans_prefix, dim=-1)[:, :-1]              # (N_rays, N_samples)
+
+    # 4) Per-sample weights: w_i = T_i * α_i
+    weights = T * alpha                                          # (N_rays, N_samples)
+
+    # 5) Composite color & depth using the weights
+    comp_rgb = torch.sum(weights[..., None] * rgb, dim=-2)       # (N_rays, 3)
+    depth    = torch.sum(weights * z_vals, dim=-1, keepdim=True) # (N_rays, 1)
+    acc      = torch.sum(weights, dim=-1, keepdim=True)          # (N_rays, 1)
+
+    # 6) Optional white background: add remaining transmittance as white
+    if white_bkgd:
+        comp_rgb = comp_rgb + (1.0 - acc)
+
+    return comp_rgb, depth, acc, weights
+
 
 # ==========================
 # 8) TRAINING LOOP
