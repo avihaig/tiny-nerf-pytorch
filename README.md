@@ -70,6 +70,7 @@ tiny-nerf-pytorch/
 │   ├── nerf.py               # Core TinyNeRF MLP model
 │   ├── rays.py               # Ray generation from camera poses
 │   ├── sampling.py           # Stratified sampling along rays
+│   ├── tiny_nerf_min.py      # Single-file, minimal TinyNeRF (read-first version)
 │   ├── volume.py             # Volume rendering (alpha compositing)
 │   ├── utils.py              # Utility functions (PSNR)
 │   ├── train.py              # Main training loop (with Tyro CLI)
@@ -252,6 +253,38 @@ python src/make_gif.py
 
 You’ll get `outputs/novel_views.gif` — a camera flying around the reconstructed scene.
 
+---
+### ⚡️ TinyNeRF — Minimal Single-File Version
+
+If you prefer a **super small, linear script** to learn from before diving into the full modular code, use:
+
+- `src/tiny_nerf_min.py` — a self-contained TinyNeRF with the same algorithmic steps (rays → samples → encode → MLP → volume render → loss) but fewer abstractions and minimal dependencies.
+
+**When to use this version**
+- You want to **read everything in one file** with top-to-bottom execution.
+- You’re teaching or learning and want **maximum readability** with fewer moving parts.
+- You don’t need the extras (Tyro CLI, GIF rendering, camera path utilities, etc.).
+
+**What’s different vs the full repo**
+- ✅ Same math: positional encoding, stratified sampling, volume rendering, MSE/PSNR.
+- ✅ Same training recipe (Adam, mixed precision optional, preview renders).
+- 🧩 Fewer modules (no separate `rays.py`, `volume.py`, etc.—the logic is inline).
+- 🧪 Fewer knobs (hard-coded hyperparameters for clarity).
+- 🚫 No GIF/camera path helpers; just **train + preview**.
+
+**Run the minimal version**
+```bash
+python src/tiny_nerf_min.py
+
+This will:
+
+- 📥 **Download or load** `tiny_nerf_data.npz` (if it’s not already present)
+- 🧠 **Train** a lightweight TinyNeRF model for a short schedule
+- 🖼️ **Save** preview and final render images in the `outputs/` directory
+
+> 💡 **Tip:** Use the minimal file first to understand the **full NeRF flow** end-to-end.
+> Once comfortable, switch to the **modular version** (`src/train.py`) to experiment
+> with components or extend the model (e.g., add view-direction inputs).
 ---
 
 ## 🧾 Cheat Sheet
