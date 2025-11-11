@@ -275,6 +275,7 @@ If you prefer a **super small, linear script** to learn from before diving into 
 **Run the minimal version**
 ```bash
 python src/tiny_nerf_min.py
+```
 
 This will:
 
