@@ -408,3 +408,198 @@ Let’s test with a single coordinate x = [1.0, 2.0, 3.0]:
     # sin/cos for each of 3 coords at 2 frequencies = 3 * 2 * 2 = 12
     # total = 15 values per point
 """
+
+
+# ==========================
+# 5) THE TINY NeRF MLP
+# ==========================
+class TinyNeRF(nn.Module):
+    """
+    A minimal MLP (Multi-Layer Perceptron) used by NeRF to predict color and density
+    from encoded 3D coordinates.
+
+    The network learns a continuous function:
+        F_θ(x, y, z) → (r, g, b, σ)
+
+    where:
+        (x, y, z)  = 3D position (after positional encoding)
+        (r, g, b)  = color at that location, in [0,1]
+        σ (sigma)  = density (how much the point absorbs light)
+
+    ---------------------------------------------------------------
+    Architecture Overview
+    ---------------------------------------------------------------
+    Input:
+      - encoded 3D point (dim = enc.out_dim, usually 63)
+    Layers:
+      - several fully-connected (Linear) layers with ReLU activations
+      - one "skip connection" layer that re-injects the original input halfway through
+    Output:
+      - rgb   (3 channels, squashed by Sigmoid to [0,1])
+      - sigma (1 channel, non-negative by ReLU)
+
+    ---------------------------------------------------------------
+    WHY THE SKIP CONNECTION?
+    ---------------------------------------------------------------
+    It reintroduces the original input halfway through the network,
+    helping the model remember *where* each point is in space.
+    Without it, deeper MLPs tend to “forget” positional details.
+    ---------------------------------------------------------------
+    ---------------------------------------------------------------
+    VISUAL REPRESENTATION
+    ---------------------------------------------------------------
+
+                ┌──────────────────────────────────────────────────┐
+                │             Positional Encoding γ(x)             │
+                │        (input: 3D coords → output: 63D)          │
+                └──────────────────────────────────────────────────┘
+                                     │
+                                     ▼
+                            ┌───────────────────┐
+                            │  Linear(63→128)   │
+                            │  + ReLU           │
+                            └───────────────────┘
+                                     │
+                                     ▼
+                            ┌───────────────────┐
+                            │  Linear(128→128)  │  ← skip connection here
+                            │  + ReLU           │     (concat input)
+                            └───────────────────┘
+                                     │
+                              ┌──────┴───────────────────────────┐
+                              │   Concatenate h ⊕ γ(x) (adds +63) │
+                              └──────┬───────────────────────────┘
+                                     ▼
+                            ┌───────────────────┐
+                            │  Linear(191→128)  │
+                            │  + ReLU           │
+                            └───────────────────┘
+                                     │
+                                     ▼
+                            ┌───────────────────┐
+                            │  Linear(128→128)  │
+                            │  + ReLU           │
+                            └───────────────────┘
+                                     │
+                          ┌──────────┴───────────┐
+                          ▼                      ▼
+               ┌─────────────────┐     ┌────────────────────┐
+               │ Linear(128→3)   │     │ Linear(128→1)      │
+               │ + Sigmoid → RGB │     │ + ReLU → Density σ │
+               └─────────────────┘     └────────────────────┘
+    ---------------------------------------------------------------
+    
+    Understanding the PyTorch parts:
+    --------------------------------
+    • super().__init__()
+        Initializes the parent nn.Module class so PyTorch knows this is a layer.
+        Without it, the model couldn’t be moved to GPU or saved properly.
+
+    • nn.Linear(in_dim, out_dim)
+        A standard fully-connected layer:
+           output = input @ Wᵀ + b
+        where W is the weight matrix and b is the bias.
+
+    • nn.ModuleList([...])
+        A Python list that registers each layer as part of the module.
+        Regular lists wouldn’t let PyTorch find their parameters automatically.
+
+    • nn.Sequential(...)
+        A quick way to chain a few layers and activations together.
+        Example:
+            nn.Sequential(nn.Linear(128, 3), nn.Sigmoid())
+        means: apply a Linear layer → then a Sigmoid activation.
+
+    • torch.relu()
+        Applies ReLU activation: max(0, x), introducing non-linearity.
+
+    • torch.cat([h, x_enc], dim=-1)
+        Concatenates tensors along their last dimension.
+        Here, it merges the current activations (h) with the original input (x_enc)
+        during the skip connection stage.
+
+    ---------------------------------------------------------------
+    Example:
+    --------
+    Suppose:
+      - Input encoding has size 63 (enc.out_dim)
+      - hidden = 128
+      - depth = 4
+      - skip_at = 2
+
+    Then the network looks like:
+
+      Layer 1: Linear(63 → 128)
+      Layer 2: Linear(128 → 128)
+      [skip connection adds +63 here]
+      Layer 3: Linear(191 → 128)
+      Layer 4: Linear(128 → 128)
+      Heads:
+        σ: Linear(128 → 1) + ReLU
+        rgb: Linear(128 → 3) + Sigmoid
+    ---------------------------------------------------------------
+    Summary Table:
+    | Component         | Purpose                            | Analogy                             |
+    | ----------------- | ---------------------------------- | ----------------------------------- |
+    | `nn.Linear`       | Fully-connected layer              | Like y = mx + b for vectors         |
+    | `nn.ModuleList`   | Holds layers that PyTorch can see  | Like a “trainable list”             |
+    | `nn.Sequential`   | Chains simple layers together      | Like a mini pipeline                |
+    | `skip connection` | Re-adds original input mid-network | Helps memory of spatial coordinates |
+    | `ReLU`, `Sigmoid` | Activations (shape of output)      | ReLU → non-negative, Sigmoid → 0–1  |
+    ---------------------------------------------------------------
+    """
+    def __init__(self, in_dim, hidden=128, depth=4, skip_at=2):
+        super().__init__()
+        self.in_dim = in_dim      # input feature size (e.g., 63)
+        self.hidden = hidden      # hidden layer width
+        self.depth = depth        # number of fully connected layers
+        self.skip_at = skip_at    # where to apply the skip connection
+
+        layers = []
+        last = in_dim
+
+        # Build the fully-connected backbone
+        for i in range(depth):
+            layers.append(nn.Linear(last, hidden))
+            # After skip layer, next input = previous hidden + original input
+            last = hidden if i != (skip_at - 1) else (hidden + in_dim)
+
+        # Register the layers so PyTorch can track them
+        self.layers = nn.ModuleList(layers)
+
+        # Two small "heads" for final outputs
+        self.sigma = nn.Sequential(nn.Linear(hidden, 1), nn.ReLU(inplace=True))
+        self.rgb   = nn.Sequential(nn.Linear(hidden, 3), nn.Sigmoid())
+
+    def forward(self, x_enc):
+        """
+        Forward pass through the MLP.
+        Input:  x_enc (..., in_dim)
+        Output: rgb (..., 3), sigma (..., 1)
+        """
+        h = x_enc
+        for i, lin in enumerate(self.layers):
+            h = torch.relu(lin(h))
+            # Add skip connection after the chosen layer
+            if i == (self.skip_at - 1):
+                h = torch.cat([h, x_enc], dim=-1)
+        sigma = self.sigma(h)  # density prediction (non-negative)
+        rgb   = self.rgb(h)    # color prediction (0..1)
+        return rgb, sigma
+
+
+# ===========================
+# 6) STRATIFIED SAMPLING
+# ===========================
+
+# ===============================
+# 7) VOLUME RENDERING (COMPOSITE)
+# ===============================
+
+# ==========================
+# 8) TRAINING LOOP
+# ==========================
+
+# ==========================
+# 9) FULL-IMAGE RENDER
+# ==========================
