@@ -1098,7 +1098,363 @@ def volume_render(rgb, sigma, z_vals, rays_d, white_bkgd=True):
 # ==========================
 # 8) TRAINING LOOP
 # ==========================
+def mse2psnr(mse: torch.Tensor) -> torch.Tensor:
+    """
+    Convert Mean Squared Error (MSE) into PSNR (Peak Signal-to-Noise Ratio),
+    a standard image quality metric.
+
+    ---------------------------------------------------------------
+    WHY WE USE IT
+    ---------------------------------------------------------------
+    During training, we minimize the **MSE** between the rendered pixel colors
+    and the ground truth image pixels:
+        MSE = average((predicted - target)^2)
+
+    This tells us *numerically* how far our predictions are from reality,
+    but MSE is hard to interpret — "is 0.002 good or bad?"
+
+    So we convert MSE → **PSNR**, which expresses image quality in decibels (dB).
+    It’s a logarithmic measure used in image compression and reconstruction tasks.
+
+    In the original NeRF paper (Mildenhall et al., ECCV 2020),
+    **PSNR is the main quantitative metric** used to evaluate how sharp and
+    realistic the rendered images are compared to the ground truth.
+
+    ---------------------------------------------------------------
+    FORMULA
+    ---------------------------------------------------------------
+        PSNR = -10 * log10(MSE)
+
+    - The smaller the error (MSE ↓), the higher the PSNR (↑).
+    - A PSNR around:
+        20 dB  → rough/blurry reconstruction
+        25 dB  → reasonable quality
+        30 dB+ → very sharp / nearly identical to ground truth
+
+    ---------------------------------------------------------------
+    IMPLEMENTATION NOTES
+    ---------------------------------------------------------------
+    • We use torch.log10() for the base-10 logarithm.
+    • clamp_min(1e-10) avoids log(0) which is undefined.
+    • Returned PSNR is in decibels (dB).
+
+    In short:
+        → MSE measures *error* (lower = better)
+        → PSNR measures *visual fidelity* (higher = better)
+    """
+    return -10.0 * torch.log10(mse.clamp_min(1e-10))
+
+
+
+def train():
+    """
+    End-to-end optimization of the TinyNeRF model.
+
+    ---------------------------------------------------------------
+    GOAL
+    ---------------------------------------------------------------
+    We want the model to learn a function that, when we:
+      1) generate camera rays for a training image,
+      2) sample 3D points along those rays,
+      3) encode points and run them through the MLP,
+      4) volume-render the per-ray colors,
+    the **rendered pixels** match the **ground-truth pixels**.
+
+    We minimize the Mean Squared Error (MSE) between:
+        rendered RGB  vs  dataset RGB
+    and we report PSNR for interpretability.
+
+    ---------------------------------------------------------------
+    HIGH-LEVEL LOOP (ONE ITERATION)
+    ---------------------------------------------------------------
+    1) Pick a training image (cycled by index).
+    2) Randomly choose N_RAND pixel positions (rays) from that image.
+    3) For each ray:
+         a) sample depths z in [NEAR, FAR] (with jitter)
+         b) compute 3D points p = o + z*d
+         c) positional-encode p
+         d) predict (rgb, sigma) with the MLP
+         e) composite to a pixel color via volume rendering
+    4) Compare rendered pixels vs ground truth pixels → MSE → backprop.
+    5) Log loss/PSNR; periodically render a preview frame; save checkpoints.
+
+    ---------------------------------------------------------------
+    WHY RANDOM SUBSETS OF RAYS?
+    ---------------------------------------------------------------
+    Each (H×W) image can have ~10k pixels; running all rays each step is slow.
+    Instead, we **sample a subset** of rays per step (mini-batch), which:
+      • reduces memory and time per step,
+      • introduces stochasticity → better generalization (like standard SGD).
+
+    ---------------------------------------------------------------
+    MIXED PRECISION (AMP)
+    ---------------------------------------------------------------
+    We wrap forward pass in:
+        with torch.amp.autocast("cuda", enabled=(device.type=="cuda")):
+    and scale the loss with GradScaler. This speeds up training on modern GPUs
+    and reduces memory usage with minimal code changes.
+
+    ---------------------------------------------------------------
+    LOGGING & ARTIFACTS
+    ---------------------------------------------------------------
+    - Every 100 steps: print loss and PSNR.
+    - Every PREVIEW_EVERY steps: render a full image for the next pose, save PNG.
+    - After last step: save model checkpoint and a final render.
+
+    ---------------------------------------------------------------
+    SHAPES (per step, conceptual)
+    ---------------------------------------------------------------
+      rays_o, rays_d          : (N_RAND, 3)
+      z_vals                  : (N_RAND, N_SAMPLES)
+      pts                     : (N_RAND, N_SAMPLES, 3)
+      enc(pts.reshape(-1,3))  : (N_RAND*N_SAMPLES, enc_dim)
+      rgb                     : (N_RAND*N_SAMPLES, 3)
+      sigma                   : (N_RAND*N_SAMPLES, 1)
+      reshaped rgb            : (N_RAND, N_SAMPLES, 3)
+      reshaped sigma          : (N_RAND, N_SAMPLES, 1)
+      comp_rgb (render)       : (N_RAND, 3)
+      target (GT)             : (N_RAND, 3)
+
+    """
+    t0 = time.time()
+
+    for step in range(ITERS):
+        model.train()
+
+        # 1) Choose which training image to use (cycles 0..N-1).
+        # Each training step uses one view (pose) from the dataset.
+        # Example: at step 5, use image index 5 % N - means "5 modulo N" — it gives the *remainder* when 5 is divided by N.
+        # ensures that even if we run thousands of training steps, we keep looping evenly through all N images.
+        img_i = step % N
+
+        # 2) Randomly select a subset of rays (pixels) from that image.
+        """
+        ---------------------------------------------------------------
+        SUMMARY (per batch)
+        ---------------------------------------------------------------
+        For each of N_RAND pixels we now have:
+            rays_o  → starting point of the ray in 3D (camera center)
+            rays_d  → direction of the ray into the scene
+            target  → what color the camera actually saw at that pixel
+
+        The model will later try to reproduce "target" by rendering along
+        (rays_o, rays_d) using its learned 3D scene representation.
+        """
+        #    - torch.randint generates random pixel indices between 0 and H*W-1.
+        #    - Each index represents one (x, y) pixel, flattened to a 1D array.
+        #    - N_RAND controls the number of sampled pixels (mini-batch size).
+        inds = torch.randint(0, H * W, (N_RAND,), device=device)
+
+        # Gather the corresponding ray origins and directions.
+        # These were precomputed for every pixel of every image.
+        rays_o = all_rays_o[img_i, inds]   # (N_RAND, 3) ray origins
+        rays_d = all_rays_d[img_i, inds]   # (N_RAND, 3) ray directions
+
+        # Fetch the ground-truth RGB colors for those same pixels.
+        target = pixels[img_i, inds]       # (N_RAND, 3) ground-truth colors
+
+        # 3) Stratified depth samples along each ray → 3D points
+        #    z_vals: (N_RAND, N_SAMPLES),  pts: (N_RAND, N_SAMPLES, 3)
+        z_vals, pts = stratified_samples(
+            NEAR, FAR, N_SAMPLES, rays_o, rays_d, randomized=True
+        )
+
+        """
+        ---------------------------------------------------------------
+        STEP 4–6: Forward pass → Render → Loss → Backprop (with AMP)
+        ---------------------------------------------------------------
+
+        WHAT WE'RE DOING (big picture)
+        ------------------------------
+        For this mini-batch of rays:
+          1) We already sampled N_SAMPLES 3D points along each ray (shape: (N_RAND, N_SAMPLES, 3)).
+          2) We encode those points (Fourier features), run them through the MLP,
+             and get per-point predictions: color (rgb) and density (sigma).
+          3) We "composite" those predictions along each ray using volume rendering,
+             producing one RGB color per ray → a tiny rendered image patch.
+          4) We compare that to the ground-truth pixel colors and compute MSE.
+          5) We backpropagate to update the MLP weights.
+
+        WHY THE FLATTEN/RESHAPE?
+        ------------------------
+        The MLP expects inputs of shape (Batch, Features). We currently have:
+            pts: (N_RAND, N_SAMPLES, 3)
+        That means "N_RAND rays × N_SAMPLES points per ray".
+        We flatten to a single big batch of 3D points:
+            pts.reshape(-1, 3) → (N_RAND * N_SAMPLES, 3)
+        Then we encode and run the MLP on all points at once (fast & vectorized).
+        After predicting, we reshape the outputs back to per-ray, per-sample shapes
+        so the volume renderer can combine them along each ray.
+
+        WHAT IS MIXED PRECISION (AMP)?
+        ------------------------------
+        AMP = Automatic Mixed Precision.
+        - It runs parts of the model in float16 (half precision) when safe,
+          and float32 when needed — automatically.
+        - Pros: faster and uses less GPU memory on modern GPUs.
+        - We wrap the forward pass with:
+              with torch.amp.autocast("cuda", enabled=(device.type=="cuda")):
+          so AMP is only active on CUDA.
+        - We also use GradScaler to safely scale the loss before backward()
+          to avoid underflow in float16.
+
+        STEP-BY-STEP THROUGH THE LINES
+        -------------------------------
+        """
+
+        # 4) Forward pass (with optional mixed precision).
+        #    We flatten samples so the MLP runs on a big batch of points.
+        with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
+            # (A) Encode all 3D points (Fourier features).
+            #     pts: (N_RAND, N_SAMPLES, 3) → flatten to (N_RAND*N_SAMPLES, 3)
+            xenc = enc(pts.reshape(-1, 3))             # → (N_RAND*N_SAMPLES, enc_dim)
+
+            # (B) Predict per-point outputs with the MLP:
+            #     rgb:  (N_RAND*N_SAMPLES, 3)   ∈ [0,1]
+            #     sigma:(N_RAND*N_SAMPLES, 1)   ≥ 0
+            rgb, sigma = model(xenc)                   # flat predictions
+
+            # (C) Reshape back to "per-ray, per-sample" so we can composite.
+            #     rgb:   (N_RAND, N_SAMPLES, 3)
+            #     sigma: (N_RAND, N_SAMPLES, 1)
+            rgb   = rgb.reshape(N_RAND, N_SAMPLES, 3)
+            sigma = sigma.reshape(N_RAND, N_SAMPLES, 1)
+
+            # (D) Volume render along each ray:
+            #     combine (rgb, sigma) across the N_SAMPLES depths → one color per ray.
+            #     comp_rgb: (N_RAND, 3)
+            comp_rgb, _, _, _ = volume_render(rgb, sigma, z_vals, rays_d)
+
+            # (E) Compare to ground-truth target colors (same shape).
+            #     Loss is mean squared error (MSE) over the mini-batch.
+            loss = torch.mean((comp_rgb - target) ** 2)
+            psnr = mse2psnr(loss)  # human-friendly quality metric (higher is better)
+
+        """
+        BACKPROP WITH GRADIENT SCALING (AMP)
+        ------------------------------------
+        Why scale the loss? In float16, very small gradients can underflow (become 0).
+        GradScaler multiplies the loss by a large number before backward(), then
+        divides gradients back afterward — improving numerical stability.
+
+        Call order:
+          1) optimizer.zero_grad(set_to_none=True)  → clear previous grads
+          2) scaler.scale(loss).backward()         → compute scaled gradients
+          3) scaler.step(optimizer)                → apply optimizer step if finite
+          4) scaler.update()                       → adjust the scaling factor over time
+        """
+
+        # 6) Backprop with gradient scaling (stable AMP).
+        optimizer.zero_grad(set_to_none=True)
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+
+        # 7) Console logs for quick monitoring.
+        if (step + 1) % 100 == 0:
+            print(f"[step {step+1:>5}] loss={loss.item():.5f}  psnr={psnr.item():.2f} dB")
+
+        # 8) Periodically render a full image (slow but informative).
+        if (step + 1) % PREVIEW_EVERY == 0:
+            with torch.no_grad():
+                pose_idx = (img_i + 1) % N
+                img = render_image(poses[pose_idx], n_samples=N_SAMPLES)
+                imageio.imwrite(
+                    f"outputs/preview_{step+1:06d}.png",
+                    (img.cpu().numpy() * 255).astype(np.uint8),
+                )
+
+    # 9) Save final checkpoint and a final image render.
+    torch.save({"model": model.state_dict()}, "checkpoints/tinynerf_latest.pth")
+    final = render_image(poses[-1], n_samples=N_SAMPLES)
+    imageio.imwrite("outputs/final.png", (final.cpu().numpy() * 255).astype(np.uint8))
+
+    dt_min = (time.time() - t0) / 60.0
+    print(f"[done] {ITERS} iters in {dt_min:.2f} min  -> outputs/final.png")
 
 # ==========================
 # 9) FULL-IMAGE RENDER
 # ==========================
+@torch.no_grad()
+def render_image(pose, n_samples=64, chunk=8192):
+    """
+    Render a full (H, W) image for a given camera pose by:
+      1) generating one ray per pixel,
+      2) sampling N points along each ray,
+      3) predicting (rgb, sigma) with the MLP,
+      4) volume-rendering along each ray,
+      5) stitching all per-ray results into an image.
+
+    We do this in *chunks* to limit peak GPU memory.
+
+    ---------------------------------------------------------------
+    WHY CHUNKING?
+    ---------------------------------------------------------------
+    A 100x100 image has 10,000 pixels, i.e., 10,000 rays.
+    With n_samples=64, that's 640,000 3D points in one forward pass.
+    Encoding + MLP + rendering for all of them at once can exceed GPU memory.
+    So we split the rays into smaller batches ("chunks") and process them
+    sequentially. The final image is just the concatenation of all chunks.
+
+    ---------------------------------------------------------------
+    INPUTS
+    ---------------------------------------------------------------
+    pose      : (4, 4) camera-to-world matrix for the desired viewpoint
+    n_samples : number of depth samples per ray
+    chunk     : number of rays processed at once (memory/speed trade-off)
+
+    ---------------------------------------------------------------
+    OUTPUT
+    ---------------------------------------------------------------
+    img : (H, W, 3) tensor in [0, 1]
+        The rendered RGB image for the given pose.
+
+    ---------------------------------------------------------------
+    SHAPES INSIDE (per chunk)
+    ---------------------------------------------------------------
+      ro, rd                 : (R, 3)                 # R = chunk size (≤ H*W)
+      z_vals                 : (R, n_samples)
+      pts                    : (R, n_samples, 3)
+      enc(pts.reshape(-1,3)) : (R*n_samples, enc_dim)
+      rgb, sigma             : (R*n_samples, 3/1)  → reshaped to (R, n_samples, 3/1)
+      comp_rgb               : (R, 3)
+
+    ---------------------------------------------------------------
+    MENTAL MODEL
+    ---------------------------------------------------------------
+    "Rendering an image" = "Rendering many rays."
+    Each ray is independent, so chunking does not change the final image;
+    it only controls how many rays we process at once to fit into memory.
+    """
+    model.eval()  # set to inference mode (affects e.g. dropout/batchnorm if present)
+
+    # 1) Build all rays for this pose (one per pixel), then flatten to (H*W, 3).
+    rays_o, rays_d = get_rays(H, W, focal, pose, device=device)  # (H*W,3), (H*W,3)
+
+    # 2) We'll render in pieces and collect results here.
+    out_rgb_chunks = []
+
+    # 3) Process rays in chunks to control memory.
+    for start in range(0, rays_o.shape[0], chunk):
+        end = start + chunk
+        ro = rays_o[start:end]  # (R, 3)
+        rd = rays_d[start:end]  # (R, 3)
+
+        # 4) Sample depths and compute 3D points along these rays.
+        z_vals, pts = stratified_samples(NEAR, FAR, n_samples, ro, rd, randomized=False)
+
+        # 5) Encode and predict for all points in this chunk (flatten → MLP → reshape).
+        xenc = enc(pts.reshape(-1, 3))              # (R*n_samples, enc_dim)
+        rgb, sigma = model(xenc)                    # flat predictions
+        rgb   = rgb.reshape(ro.shape[0], n_samples, 3)
+        sigma = sigma.reshape(ro.shape[0], n_samples, 1)
+
+        # 6) Composite along the ray to get one RGB per ray in this chunk.
+        comp_rgb, _, _, _ = volume_render(rgb, sigma, z_vals, rd)  # (R, 3)
+
+        out_rgb_chunks.append(comp_rgb)
+
+    # 7) Concatenate all chunks back to (H*W, 3) and reshape to image (H, W, 3).
+    img = torch.cat(out_rgb_chunks, dim=0).reshape(H, W, 3).clamp(0.0, 1.0)
+    return img
